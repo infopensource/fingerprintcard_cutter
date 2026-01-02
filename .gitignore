@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+*.swo
+*.tmp
+*.log
+
+.venv/
+.env/
+
+# Outputs
+/demo_output/
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tif
+*.tiff
+mask_debug.png
+
+# Editors
+.vscode/
+.idea/
