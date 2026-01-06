@@ -21,9 +21,9 @@ def make_simulated_photo(template_png='template.png', out='simulated_capture.png
 if __name__ == '__main__':
     build_template('template.png', 'template.json')
     print('Template generated.')
-    # sim = make_simulated_photo('template.png', 'simulated_capture.png')
+    sim = make_simulated_photo('template.png', 'simulated_capture.png')
     # sim = 'image.png'
-    sim = 'template.png'
+    # sim = 'template.png'
     print('Simulated photo:', sim)
     os.makedirs('demo_output', exist_ok=True)
     crops = preprocess_card.preprocess_image(sim, 'template.json', output_dir='demo_output')

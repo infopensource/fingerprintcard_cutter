@@ -224,13 +224,17 @@ def _rotate_list_left(lst, k):
     return lst[k:] + lst[:k]
 
 
-def _filter_markers_by_size(markers, tpl):
+def _filter_markers_by_size(markers, tpl, img_width):
+    """Filter markers by expected size, scaled to input image dimensions."""
     if not markers or 'fid_size' not in tpl:
         return markers
-    fid_px = tpl['fid_size'] * tpl['width']
+    # Scale expected marker size to input image, not template size
+    # fid_size is the ratio of marker size to template width
+    fid_ratio = tpl['fid_size']                    # e.g., 0.04 (80/2000)
+    fid_px = fid_ratio * img_width                 # scale to actual input image width
     expected_square_area = fid_px * fid_px
-    min_area = expected_square_area * 0.05  # allow smaller (aliasing/rotation/low-res)
-    max_area = expected_square_area * 4.0   # stricter: exclude finger boxes (~66k area)
+    min_area = expected_square_area * 0.05         # allow smaller (aliasing/rotation/low-res)
+    max_area = expected_square_area * 4.0          # exclude finger boxes
     filtered = [m for m in markers if min_area <= m['area'] <= max_area]
     return filtered or markers  # if filtered empty, fall back to original
 
@@ -244,13 +248,14 @@ def preprocess_image(input_path, template_json='template.json', output_dir='crop
 
     tpl = load_template(template_json)
     TW, TH = tpl['width'], tpl['height']
+    img_h, img_w = img_gray.shape  # input image dimensions
 
     warped_rgb = None
 
     # 1) Preferred: detect corner markers (3 squares + 1 triangle) and compute homography
     markers = detect_corner_markers(img_gray)
-    markers = _filter_markers_by_size(markers, tpl)
-    chosen = _assign_best_marker_per_corner(markers, img_gray.shape[1], img_gray.shape[0]) if markers else None
+    markers = _filter_markers_by_size(markers, tpl, img_w)  # use input image width for scaling
+    chosen = _assign_best_marker_per_corner(markers, img_w, img_h) if markers else None
     if chosen is not None and tpl.get('markers'):
         idx_triangle = None
         for i, m in enumerate(chosen):
