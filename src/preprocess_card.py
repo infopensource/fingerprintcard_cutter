@@ -2,6 +2,19 @@ import cv2
 import numpy as np
 import json
 import os
+import math
+
+
+def _decode_qr(img_bgr):
+    detector = cv2.QRCodeDetector()
+    data, pts, _ = detector.detectAndDecode(img_bgr)
+    if not data:
+        return None, None
+    # Expect payload like "<uuid>|finger" or "<uuid>|palm"
+    parts = data.split('|')
+    uid = parts[0]
+    page = parts[1].lower() if len(parts) > 1 else None
+    return uid, page
 
 
 def load_template(template_json='template.json'):
@@ -46,16 +59,26 @@ def order_points(pts):
     return rect
 
 
+def _scaled_template_dims(img, template_w, template_h):
+    """Choose an output size that never downsamples versus the input."""
+    img_h, img_w = img.shape[:2]
+    scale = max(1.0, max(img_w / float(template_w), img_h / float(template_h)))
+    tw = int(math.ceil(template_w * scale))
+    th = int(math.ceil(template_h * scale))
+    return tw, th, scale
+
+
 def warp_to_template(img, src_pts, template_w, template_h):
-    dst = np.array([[0, 0], [template_w - 1, 0], [template_w - 1, template_h - 1], [0, template_h - 1]], dtype='float32')
+    tw, th, scale = _scaled_template_dims(img, template_w, template_h)
+    dst = np.array([[0, 0], [tw - 1, 0], [tw - 1, th - 1], [0, th - 1]], dtype='float32')
     M = cv2.getPerspectiveTransform(src_pts, dst)
-    warped = cv2.warpPerspective(img, M, (template_w, template_h))
+    warped = cv2.warpPerspective(img, M, (tw, th))
     return warped
 
 
-def crop_boxes_from_warp(warped_rgb, template_json='template.json', out_dir='crops'):
+def crop_boxes_from_warp(warped_rgb, template_json='template.json', out_dir='crops', name_suffix=None):
     tpl = load_template(template_json)
-    H, W = tpl['height'], tpl['width']
+    H, W = warped_rgb.shape[:2]
     boxes = tpl['boxes']
     os.makedirs(out_dir, exist_ok=True)
     crops = []
@@ -64,8 +87,12 @@ def crop_boxes_from_warp(warped_rgb, template_json='template.json', out_dir='cro
         y = int(b['y'] * H)
         w = int(b['w'] * W)
         h = int(b['h'] * H)
-        crop = warped_rgb[y:y+h, x:x+w]
-        out_path = os.path.join(out_dir, f'finger_{i+1}.png')
+        x1 = max(0, min(W, x + w))
+        y1 = max(0, min(H, y + h))
+        crop = warped_rgb[y:y1, x:x1]
+        name = b.get('name') or f'finger_{i+1}'
+        fname = f"{name}_{name_suffix}.png" if name_suffix else f"{name}.png"
+        out_path = os.path.join(out_dir, fname)
         cv2.imwrite(out_path, cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
         crops.append(out_path)
     return crops
@@ -91,9 +118,10 @@ def detect_corner_markers(img_gray):
         found = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < img_area * 0.000005:
+            # allow smaller blobs to pass; high-DPI markers can fragment
+            if area < img_area * 0.000001:
                 continue
-            if area > img_area * 0.2:
+            if area > img_area * 0.25:
                 continue
 
             peri = cv2.arcLength(cnt, True)
@@ -130,7 +158,7 @@ def detect_corner_markers(img_gray):
             tri_fill = (area / float(tri_area)) if tri_area and tri_area > 1e-6 else 0.0
             tri_rect_ratio = tri_fill / max(rect_fill, 1e-6)
 
-            if tri_rect_ratio > 1.05 and rect_fill <= 0.9:
+            if tri_rect_ratio > 1.02 and rect_fill <= 0.9:
                 found.append({'type': 'triangle', 'cx': cx, 'cy': cy, 'area': area})
             elif (0.55 <= min_rect_aspect <= 1.8) and min_rect_fill >= 0.2:
                 found.append({'type': 'square', 'cx': cx, 'cy': cy, 'area': area})
@@ -139,15 +167,27 @@ def detect_corner_markers(img_gray):
     h, w = img_gray.shape
     img_area = float(h * w)
 
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+
     # Pass 1: Otsu-based binarization (default)
     th1 = _binarize_for_markers(img_gray)
     markers = detect_on_mask(th1, img_area)
+
+    # Pass 1b: dilated Otsu (connect fragmented markers)
+    if len(markers) < 4:
+        th1d = cv2.dilate(th1, kernel, iterations=1)
+        markers.extend(detect_on_mask(th1d, img_area))
 
     # Pass 2: Adaptive threshold (handles uneven lighting) if needed
     if len(markers) < 4:
         th2 = cv2.adaptiveThreshold(img_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                     cv2.THRESH_BINARY_INV, 35, 5)
         markers.extend(detect_on_mask(th2, img_area))
+
+    # Pass 2b: dilated adaptive
+    if len(markers) < 4:
+        th2d = cv2.dilate(th2, kernel, iterations=1)
+        markers.extend(detect_on_mask(th2d, img_area))
 
     # Merge close duplicates (within 12 px)
     merged = []
@@ -163,25 +203,50 @@ def detect_corner_markers(img_gray):
     return merged
 
 
-def _assign_best_marker_per_corner(markers, img_w, img_h):
-    # Choose one marker per image corner (TL, TR, BR, BL) based on area & proximity.
+def _assign_best_marker_per_corner(markers, img_w, img_h, tpl=None):
+    """Choose one marker per corner with template-constrained windows and tighter distance limits."""
     corners = np.array(
         [[0.0, 0.0], [img_w - 1.0, 0.0], [img_w - 1.0, img_h - 1.0], [0.0, img_h - 1.0]],
         dtype=np.float32,
     )
 
-    # Maximum distance a marker can be from its corner to be considered (fraction of image diagonal)
-    max_corner_dist = 0.5 * min(img_w, img_h)
+    # Expected normalized positions from template markers (TL, TR, BR, BL)
+    expected = None
+    if tpl and tpl.get('markers'):
+        id_to_marker = {m['id']: m for m in tpl.get('markers', [])}
+        order = tpl.get('marker_order', ['TL', 'TR', 'BR', 'BL'])
+        expected = []
+        for mid in order:
+            mk = id_to_marker.get(mid)
+            if mk is None:
+                expected = None
+                break
+            expected.append([mk['cx'] * img_w, mk['cy'] * img_h])
+        if expected:
+            expected = np.array(expected, dtype=np.float32)
+
+    # Tighter spatial constraints
+    max_corner_dist = 0.20 * min(img_w, img_h)
+    exp_window = 0.12 * min(img_w, img_h)  # allowed deviation around expected position
 
     buckets = {0: [], 1: [], 2: [], 3: []}
     for m in markers:
         p = np.array([m['cx'], m['cy']], dtype=np.float32)
         d2 = np.sum((corners - p) ** 2, axis=1)
         corner_idx = int(np.argmin(d2))
-        dist = np.sqrt(d2[corner_idx])
-        if dist > max_corner_dist:
+        dist_corner = np.sqrt(d2[corner_idx])
+        if dist_corner > max_corner_dist:
             continue
-        score = float(m['area']) / (float(d2[corner_idx]) + 1.0)
+
+        if expected is not None:
+            dist_exp = np.linalg.norm(p - expected[corner_idx])
+            if dist_exp > exp_window:
+                continue
+        else:
+            dist_exp = dist_corner
+
+        # Score favors proximity; area adds mild preference to bigger blobs
+        score = -dist_exp + 0.5 * np.sqrt(max(m.get('area', 0.0), 1.0))
         buckets[corner_idx].append((score, m))
 
     chosen = [None, None, None, None]
@@ -198,9 +263,32 @@ def _assign_best_marker_per_corner(markers, img_w, img_h):
         if chosen[cidx] is not None:
             continue
         if not buckets[cidx]:
-            return None
+            chosen[cidx] = None
+            continue
         buckets[cidx].sort(key=lambda t: t[0], reverse=True)
         chosen[cidx] = buckets[cidx][0][1]
+
+    # If only one corner is missing, synthesize it as a parallelogram completion.
+    missing = [i for i, v in enumerate(chosen) if v is None]
+    if missing:
+        if len(missing) > 1:
+            return None
+        miss = missing[0]
+        pts = [None if v is None else np.array([v['cx'], v['cy']], dtype=np.float32) for v in chosen]
+        if miss == 0 and pts[1] is not None and pts[3] is not None:  # TL = TR + BL - BR
+            pts[0] = pts[3] + (pts[1] - pts[2]) if pts[2] is not None else None
+        elif miss == 1 and pts[0] is not None and pts[2] is not None:  # TR = TL + BR - BL
+            pts[1] = pts[0] + (pts[2] - pts[3]) if pts[3] is not None else None
+        elif miss == 2 and pts[1] is not None and pts[3] is not None:  # BR = TR + BL - TL
+            pts[2] = pts[1] + (pts[3] - pts[0]) if pts[0] is not None else None
+        elif miss == 3 and pts[0] is not None and pts[2] is not None:  # BL = TL + BR - TR
+            pts[3] = pts[0] + (pts[2] - pts[1]) if pts[1] is not None else None
+
+        if pts[miss] is None:
+            return None
+
+        syn = {'type': 'square', 'cx': float(pts[miss][0]), 'cy': float(pts[miss][1]), 'area': (markers[0]['area'] if markers else 1.0)}
+        chosen[miss] = syn
 
     return chosen  # [TL, TR, BR, BL] in image coordinates
 
@@ -233,18 +321,25 @@ def _filter_markers_by_size(markers, tpl, img_width):
     fid_ratio = tpl['fid_size']                    # e.g., 0.04 (80/2000)
     fid_px = fid_ratio * img_width                 # scale to actual input image width
     expected_square_area = fid_px * fid_px
-    min_area = expected_square_area * 0.05         # allow smaller (aliasing/rotation/low-res)
-    max_area = expected_square_area * 4.0          # exclude finger boxes
+    # Bounds tuned to prefer true fiducials and reject larger blobs
+    min_area = expected_square_area * 0.02         # allow smaller (aliasing/rotation/low-res)
+    max_area = expected_square_area * 4.0          # reject overly large blobs from text/graphics
     filtered = [m for m in markers if min_area <= m['area'] <= max_area]
     return filtered or markers  # if filtered empty, fall back to original
 
 
-def preprocess_image(input_path, template_json='template.json', output_dir='crops'):
+def preprocess_image(input_path, template_json='template.json', output_dir='crops', name_suffix=None, allow_contour_fallback=False):
     img_bgr = cv2.imread(input_path)
     if img_bgr is None:
         raise FileNotFoundError(input_path)
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    # If suffix not provided, try QR
+    if name_suffix is None:
+        uid, _page = _decode_qr(img_bgr)
+        if uid:
+            name_suffix = uid
 
     tpl = load_template(template_json)
     TW, TH = tpl['width'], tpl['height']
@@ -254,8 +349,9 @@ def preprocess_image(input_path, template_json='template.json', output_dir='crop
 
     # 1) Preferred: detect corner markers (3 squares + 1 triangle) and compute homography
     markers = detect_corner_markers(img_gray)
-    markers = _filter_markers_by_size(markers, tpl, img_w)  # use input image width for scaling
-    chosen = _assign_best_marker_per_corner(markers, img_w, img_h) if markers else None
+    filtered_markers = _filter_markers_by_size(markers, tpl, img_w)  # use input image width for scaling
+    chosen = _assign_best_marker_per_corner(filtered_markers, img_w, img_h, tpl) if filtered_markers else None
+    print(f"[markers] total={len(markers)} filtered={len(filtered_markers)} chosen={'yes' if chosen is not None else 'no'}")
     if chosen is not None and tpl.get('markers'):
         idx_triangle = None
         for i, m in enumerate(chosen):
@@ -280,20 +376,43 @@ def preprocess_image(input_path, template_json='template.json', output_dir='crop
         else:
             print(f"Corner markers detected. rotation_needed_deg={rotation_needed_deg}")
 
-        H = cv2.getPerspectiveTransform(src_pts_aligned, dst_pts)
-        warped_rgb = cv2.warpPerspective(img_rgb, H, (TW, TH))
+        tw_scaled, th_scaled, scale = _scaled_template_dims(img_rgb, TW, TH)
+        dst_pts_scaled = dst_pts * scale
+        H = cv2.getPerspectiveTransform(src_pts_aligned, dst_pts_scaled)
+
+        # Homography quality check: reprojection error and aspect sanity
+        proj = cv2.perspectiveTransform(src_pts_aligned[None, :, :], H)[0]
+        rms = float(np.sqrt(np.mean(np.sum((proj - dst_pts_scaled) ** 2, axis=1))))
+        template_diag = float(np.sqrt(TW * TW + TH * TH) * scale)
+        max_rms = max(10.0, 0.01 * template_diag)  # at least 10px or 1% of diag
+
+        # Aspect/edge-length consistency
+        def edge_lengths(pts):
+            return [np.linalg.norm(pts[i] - pts[(i + 1) % 4]) for i in range(4)]
+
+        tmpl_edges = edge_lengths(dst_pts_scaled)
+        proj_edges = edge_lengths(proj)
+        ratio_err = max(abs(proj_edges[i] / (tmpl_edges[i] + 1e-6) - 1.0) for i in range(4))
+
+        if rms > max_rms or ratio_err > 0.08:
+            print(f"[reject-warp] rms={rms:.1f} max={max_rms:.1f} ratio_err={ratio_err:.3f}")
+            warped_rgb = None
+        else:
+            warped_rgb = cv2.warpPerspective(img_rgb, H, (tw_scaled, th_scaled))
     else:
         print("Markers not detected (or template missing marker metadata). Falling back to largest contour.")
 
-    # 2) Fallback: use largest contour as card boundary and warp to template corners
+    # 2) Optional fallback: largest contour as card boundary. Disabled by default.
     if warped_rgb is None:
+        if not allow_contour_fallback:
+            raise RuntimeError("Markers not detected and contour fallback disabled")
         corners = find_card_corners(img_gray)
         if corners is None:
             h, w = img_gray.shape
             corners = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype='float32')
         warped_rgb = warp_to_template(img_rgb, corners.astype('float32'), TW, TH)
 
-    crops = crop_boxes_from_warp(warped_rgb, template_json, output_dir)
+    crops = crop_boxes_from_warp(warped_rgb, template_json, output_dir, name_suffix=name_suffix)
     return crops
 
 

@@ -1,0 +1,30 @@
+Usage:
+  f_process gen    [options]   # 生成多页 PDF + 模板
+  f_process pre    [options]   # 预处理扫描图并分割
+  f_process attach [options]   # 将标尺拼接到部位图
+
+Subcommand: gen (生成)
+  -n, --count <N>          生成 N 份卡（每份2页）
+  --out-pdf <PATH>         输出 PDF 路径
+  -t, --template <DIR>     模板输出目录（默认当前目录）
+  --dpi <INT>              渲染 DPI（默认 600）
+
+Subcommand: pre (分割)
+  -i, --input <DIR|FILE>   输入目录或单图
+  -o, --output <DIR>       输出目录
+  -t, --template <DIR>     模板目录（含 template_finger.json/.png, template_palm.json/.png）
+  -r, --redirect <DIR>     按部位另存到子目录
+  -s, --select <LIST>      仅导出指定部位（配合 -r），如 finger_L_3 palm_right
+  -w, --with_ruler         输出时附加带标尺拼接版本
+  --allow-contour-fallback 允许角块缺失时使用外轮廓兜底
+
+Subcommand: attach (拼接标尺)
+  --part <PATH>            部位图
+  --ruler <PATH>           标尺图（指纹/掌纹对应）
+  -p, --position <POS>     left|right|top|bottom，默认 left
+  -o, --output <PATH>      输出路径
+
+Examples:
+  f_process gen -n 5 --out-pdf ./cards.pdf
+  f_process pre -i ./scanned_images -o ./crops -t ./templates --with_ruler
+  f_process attach --part crops/finger_L_3.png --ruler crops/ruler_finger.png -p left -o out.png
