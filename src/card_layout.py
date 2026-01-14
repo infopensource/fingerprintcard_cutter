@@ -177,12 +177,8 @@ def _palm_layout(dpi: int = DEFAULT_DPI) -> Dict:
 
     # Palms
     palm_w = page_w - right - left - char_w
-    palm_label_w = char_w
     boxes.append(BoxSpec('palm_right', *_normalize_box(left, y_palm_bottom, palm_w, palm_h, page_w, page_h, dpi)))
-    boxes.append(BoxSpec('palm_right_label', *_normalize_box(left + palm_w, y_palm_bottom, palm_label_w, palm_h, page_w, page_h, dpi)))
-
     boxes.append(BoxSpec('palm_left', *_normalize_box(left, y_palm_top, palm_w, palm_h, page_w, page_h, dpi)))
-    boxes.append(BoxSpec('palm_left_label', *_normalize_box(left + palm_w, y_palm_top, palm_label_w, palm_h, page_w, page_h, dpi)))
 
     fid_size_mm = 8.0
     fid_margin_mm = 3.0

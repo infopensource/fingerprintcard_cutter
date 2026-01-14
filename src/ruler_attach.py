@@ -11,33 +11,36 @@ def _load_image(path: str) -> np.ndarray:
     return img
 
 
-def _center_crop_or_pad(img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+def _center_crop_pad_axis(img: np.ndarray, target_len: int, axis: int) -> np.ndarray:
+    """Center-crop or pad along a single axis without scaling."""
     h, w = img.shape[:2]
-    # Crop if larger
-    y0 = max((h - target_h) // 2, 0)
-    x0 = max((w - target_w) // 2, 0)
-    y1 = min(y0 + target_h, h)
-    x1 = min(x0 + target_w, w)
-    cropped = img[y0:y1, x0:x1]
-
-    # Pad if smaller
-    pad_top = max((target_h - cropped.shape[0]) // 2, 0)
-    pad_bottom = target_h - cropped.shape[0] - pad_top
-    pad_left = max((target_w - cropped.shape[1]) // 2, 0)
-    pad_right = target_w - cropped.shape[1] - pad_left
-
-    if pad_top or pad_bottom or pad_left or pad_right:
-        cropped = cv2.copyMakeBorder(cropped, pad_top, pad_bottom, pad_left, pad_right,
-                                     borderType=cv2.BORDER_CONSTANT, value=[255, 255, 255])
-    return cropped
+    if axis == 0:  # vertical (height)
+        excess = h - target_len
+        if excess > 0:
+            start = excess // 2
+            img = img[start:start + target_len, :]
+        elif excess < 0:
+            pad_top = (-excess) // 2
+            pad_bottom = -excess - pad_top
+            img = cv2.copyMakeBorder(img, pad_top, pad_bottom, 0, 0, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+    else:  # horizontal (width)
+        excess = w - target_len
+        if excess > 0:
+            start = excess // 2
+            img = img[:, start:start + target_len]
+        elif excess < 0:
+            pad_left = (-excess) // 2
+            pad_right = -excess - pad_left
+            img = cv2.copyMakeBorder(img, 0, 0, pad_left, pad_right, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+    return img
 
 
 def attach_ruler(part_path: str, ruler_path: str, out_path: str, position: str = 'right') -> str:
-    """Attach ruler to a part image without scaling.
+    """Attach ruler to a part image without any scaling.
 
-    position: 'left' | 'right' | 'top' | 'bottom'
-    - For vertical rulers (height > width), center-crop/pad ruler to part height, then concat horizontally.
-    - For horizontal rulers, center-crop/pad to part width, then concat vertically.
+    - Use ruler long edge aligned to the attach direction; rotate 90° if needed.
+    - Center-crop along the long edge to match the part dimension; pad if shorter.
+    - No resizing is performed (scale accuracy preserved).
     """
     pos = position.lower()
     if pos not in {'left', 'right', 'top', 'bottom'}:
@@ -48,24 +51,22 @@ def attach_ruler(part_path: str, ruler_path: str, out_path: str, position: str =
 
     ph, pw = part.shape[:2]
     rh, rw = ruler.shape[:2]
-    vertical = rh >= rw * 1.2  # heuristic: finger-page ruler is tall and thin
 
-    if vertical:
-        ruler_adj = _center_crop_or_pad(ruler, ph, rw)
-        # Ensure same height
-        if pos in ('left', 'right'):
-            # heights already matched; widths can differ
-            pass
-        else:
-            # If requested top/bottom with vertical ruler, still need matching width
-            ruler_adj = _center_crop_or_pad(ruler_adj, ph, pw)
+    desired_vertical = pos in ('left', 'right')
+    ruler_vertical = rh >= rw  # long edge orientation
+
+    # Rotate ruler so long edge aligns with desired orientation
+    if desired_vertical and not ruler_vertical:
+        ruler = np.rot90(ruler)
+        rh, rw = ruler.shape[:2]
+    elif not desired_vertical and ruler_vertical:
+        ruler = np.rot90(ruler)
+        rh, rw = ruler.shape[:2]
+
+    if desired_vertical:
+        ruler_adj = _center_crop_pad_axis(ruler, ph, axis=0)
     else:
-        # horizontal ruler
-        ruler_adj = _center_crop_or_pad(ruler, rh, pw)
-        if pos in ('top', 'bottom'):
-            pass
-        else:
-            ruler_adj = _center_crop_or_pad(ruler_adj, ph, pw)
+        ruler_adj = _center_crop_pad_axis(ruler, pw, axis=1)
 
     if pos == 'left':
         combined = np.concatenate([ruler_adj, part], axis=1)

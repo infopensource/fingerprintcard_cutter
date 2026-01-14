@@ -1,30 +1,67 @@
 Usage:
   f_process gen    [options]   # 生成多页 PDF + 模板
-  f_process pre    [options]   # 预处理扫描图并分割
-  f_process attach [options]   # 将标尺拼接到部位图
+  f_process pre    [options]   # 预处理扫描图并分割到“工作目录”(按 uuid 分组)
+  f_process export [options]   # 从工作目录批量 redirect 导出（3 种目录结构）
+  f_process attach [options]   # 从工作目录批量拼接标尺并导出（自动选指印/掌印标尺）
+
+工作流:
+  1) pre  : 扫描图 -> workdir/<uuid>/*.png（默认按 uuid 分组，可选 --group name 按源文件名分组）
+  2) export: workdir -> redirect_out（按 uuid / flat / part 三种方式导出）
+  3) attach: workdir -> redirect_out（导出时对所选部位拼接标尺）
 
 Subcommand: gen (生成)
-  -n, --count <N>          生成 N 份卡（每份2页）
+  -n, --count <N>          生成 N 份卡（每份 2 页：finger + palm，共享 uuid）
   --out-pdf <PATH>         输出 PDF 路径
   -t, --template <DIR>     模板输出目录（默认当前目录）
   --dpi <INT>              渲染 DPI（默认 600）
 
 Subcommand: pre (分割)
   -i, --input <DIR|FILE>   输入目录或单图
-  -o, --output <DIR>       输出目录
+  -o, --workdir <DIR>      工作目录（输出到按 uuid 的子目录）
   -t, --template <DIR>     模板目录（含 template_finger.json/.png, template_palm.json/.png）
-  -r, --redirect <DIR>     按部位另存到子目录
-  -s, --select <LIST>      仅导出指定部位（配合 -r），如 finger_L_3 palm_right
-  -w, --with_ruler         输出时附加带标尺拼接版本
+  --group <MODE>           输出分组：uuid|name（默认 uuid）。name=按源文件名分组，如 yb1.jpg -> workdir/yb1/
   --allow-contour-fallback 允许角块缺失时使用外轮廓兜底
 
-Subcommand: attach (拼接标尺)
-  --part <PATH>            部位图
-  --ruler <PATH>           标尺图（指纹/掌纹对应）
-  -p, --position <POS>     left|right|top|bottom，默认 left
-  -o, --output <PATH>      输出路径
+Subcommand: export (redirect 导出)
+  -w, --workdir <DIR>      工作目录（包含多个 <uuid>/ 子目录）
+  -o, --output <DIR>       导出目录
+  -s, --select <LIST>      仅导出指定部位（空=导出全部）；支持空格分隔
+                           例如：finger_L_1 finger_L_2 palm_left qr info
+  -m, --mode <MODE>        redirect 目录结构：uuid|flat|part（默认 uuid）
+
+  mode=uuid : 保持原结构：output/<uuid>/<part>_<uuid>.png
+  mode=flat : 全部扁平：  output/<part>_<uuid>.png
+  mode=part : 按部位分组：output/<part>/<part>_<uuid>.png
+
+Subcommand: attach (导出时拼接标尺)
+  说明：这是“批量版”的 attach，不再传入单张图片路径。
+  它会在每个 uuid 文件夹里自动寻找对应标尺图并拼接：
+    - 若导出部位名以 finger_ 开头 -> 使用该 uuid 下的 ruler_finger_* 作为标尺
+    - 若导出部位名以 palm_ 开头  -> 使用该 uuid 下的 ruler_palm_* 作为标尺
+    - 特殊映射：left_flat/right_flat 也按 finger 标尺；side_left/side_right 按 palm 标尺；ruler_* 与 label_* 不参与拼接
+
+  -w, --workdir <DIR>      工作目录（包含多个 <uuid>/ 子目录）
+  -o, --output <DIR>       导出目录
+  -s, --select <LIST>      仅对指定部位执行“拼接+导出”（空=对全部可拼接部位执行）
+  -m, --mode <MODE>        redirect 目录结构：uuid|flat|part（默认 uuid）
+  -p, --position <POS>     left|right|top|bottom（默认 left）
+  --threads <N>            多进程拼接标尺（默认 1）
 
 Examples:
-  f_process gen -n 5 --out-pdf ./cards.pdf
-  f_process pre -i ./scanned_images -o ./crops -t ./templates --with_ruler
-  f_process attach --part crops/finger_L_3.png --ruler crops/ruler_finger.png -p left -o out.png
+  # 1) 生成 5 份卡（10 页 PDF）+ 模板
+  f_process gen -n 5 --out-pdf ./cards.pdf -t ./templates
+
+  # 2) 分割扫描图到工作目录（每个 uuid 一个子目录）
+  f_process pre -i ./scanned_images -o ./workdir -t ./templates --allow-contour-fallback
+
+  # 3) redirect：按 uuid 输出（默认）
+  f_process export -w ./workdir -o ./redirect_uuid
+
+  # 4) redirect：flat 扁平输出（只导出两个部位）
+  f_process export -w ./workdir -o ./redirect_flat -m flat -s finger_L_3 palm_left
+
+  # 5) redirect：按部位分组输出
+  f_process export -w ./workdir -o ./redirect_part -m part -s finger_L_3 palm_left
+
+  # 6) 导出时拼接标尺（自动选指印/掌印标尺），按部位分组输出
+  f_process attach -w ./workdir -o ./redirect_with_ruler -m part -s finger_L_3 palm_left -p left
