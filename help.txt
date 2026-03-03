@@ -19,8 +19,11 @@ Subcommand: pre (分割)
   -i, --input <DIR|FILE>   输入目录或单图
   -o, --workdir <DIR>      工作目录（输出到按 uuid 的子目录）
   -t, --template <DIR>     模板目录（含 template_finger.json/.png, template_palm.json/.png）
+  --force-template <JSON>  强制使用指定模板 JSON 进行分割（跳过二维码识别与模板判断）
+                          说明：-t 与 --force-template 两者至少提供一个
   --group <MODE>           输出分组：uuid|name（默认 uuid）。name=按源文件名分组，如 yb1.jpg -> workdir/yb1/
   --allow-contour-fallback 允许角块缺失时使用外轮廓兜底
+  --quiet                  安静模式：仅输出汇总，不输出逐文件与算法内部日志
 
 Subcommand: export (redirect 导出)
   -w, --workdir <DIR>      工作目录（包含多个 <uuid>/ 子目录）
@@ -53,6 +56,9 @@ Examples:
 
   # 2) 分割扫描图到工作目录（每个 uuid 一个子目录）
   f_process pre -i ./scanned_images -o ./workdir -t ./templates --allow-contour-fallback
+
+  # 2b) 强制使用指定模板分割（不做二维码模板识别）
+  f_process pre -i ./scanned_images -o ./workdir -t ./templates --force-template ./templates/template_finger.json
 
   # 3) redirect：按 uuid 输出（默认）
   f_process export -w ./workdir -o ./redirect_uuid

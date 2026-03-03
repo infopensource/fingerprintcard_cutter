@@ -18,9 +18,9 @@ import re
 import shutil
 import tempfile
 import multiprocessing
+import io
+from contextlib import redirect_stdout
 
-from src.build_card_templates import save_template_assets
-from src.generate_cards_pdf import generate_cards
 from src import preprocess_auto, preprocess_card
 from src import export_redirect, attach_batch
 
@@ -31,8 +31,8 @@ def _preprocess_worker(args):
     
     Returns a dict with processing result to maintain ordered output in main process.
     """
-    (file_path_str, tpl_finger, tpl_palm, workdir_str, 
-     allow_contour_fallback, temp_dir_str, group_mode) = args
+    (file_path_str, tpl_finger, tpl_palm, workdir_str,
+     allow_contour_fallback, temp_dir_str, group_mode, force_template, quiet) = args
     
     file_path = Path(file_path_str)
     workdir = Path(workdir_str)
@@ -48,23 +48,62 @@ def _preprocess_worker(args):
     }
     
     try:
-        # Auto preprocessing
-        try:
-            crops = preprocess_auto.preprocess_auto(
-                str(file_path),
-                str(tpl_finger),
-                str(tpl_palm),
-                output_dir=str(temp_dir),
-                allow_contour_fallback=allow_contour_fallback
-            )
-        except Exception:
-            # Fallback to single template
-            crops = preprocess_card.preprocess_image(
-                str(file_path),
-                template_json=str(tpl_finger),
-                output_dir=str(temp_dir),
-                allow_contour_fallback=allow_contour_fallback
-            )
+        # Force a specific template: skip auto classification / QR-template selection.
+        if force_template:
+            if quiet:
+                with redirect_stdout(io.StringIO()):
+                    crops = preprocess_card.preprocess_image(
+                        str(file_path),
+                        template_json=str(force_template),
+                        output_dir=str(temp_dir),
+                        name_suffix=file_path.stem,
+                        allow_contour_fallback=allow_contour_fallback
+                    )
+            else:
+                crops = preprocess_card.preprocess_image(
+                    str(file_path),
+                    template_json=str(force_template),
+                    output_dir=str(temp_dir),
+                    name_suffix=file_path.stem,
+                    allow_contour_fallback=allow_contour_fallback
+                )
+        else:
+            # Auto preprocessing
+            try:
+                if quiet:
+                    with redirect_stdout(io.StringIO()):
+                        crops = preprocess_auto.preprocess_auto(
+                            str(file_path),
+                            str(tpl_finger),
+                            str(tpl_palm),
+                            output_dir=str(temp_dir),
+                            allow_contour_fallback=allow_contour_fallback
+                        )
+                else:
+                    crops = preprocess_auto.preprocess_auto(
+                        str(file_path),
+                        str(tpl_finger),
+                        str(tpl_palm),
+                        output_dir=str(temp_dir),
+                        allow_contour_fallback=allow_contour_fallback
+                    )
+            except Exception:
+                # Fallback to single template
+                if quiet:
+                    with redirect_stdout(io.StringIO()):
+                        crops = preprocess_card.preprocess_image(
+                            str(file_path),
+                            template_json=str(tpl_finger),
+                            output_dir=str(temp_dir),
+                            allow_contour_fallback=allow_contour_fallback
+                        )
+                else:
+                    crops = preprocess_card.preprocess_image(
+                        str(file_path),
+                        template_json=str(tpl_finger),
+                        output_dir=str(temp_dir),
+                        allow_contour_fallback=allow_contour_fallback
+                    )
         
         # Organize files by UUID or by input filename
         if group_mode == 'name':
@@ -84,6 +123,11 @@ def _preprocess_worker(args):
                         uuid_dir = workdir / uuid
                         uuid_dir.mkdir(exist_ok=True, parents=True)
                         dest = uuid_dir / crop_file.name
+                        shutil.copy2(str(crop_file), str(dest))
+                    else:
+                        fallback_dir = workdir / file_path.stem
+                        fallback_dir.mkdir(exist_ok=True, parents=True)
+                        dest = fallback_dir / crop_file.name
                         shutil.copy2(str(crop_file), str(dest))
                     crop_file.unlink()  # Clean up temp file either way
         
@@ -112,9 +156,12 @@ def setup_subparsers(parser, lang='en'):
             'pre_input': 'Input directory or single image file',
             'pre_workdir': 'Work directory (outputs organized by UUID subdirectories)',
             'pre_template': 'Template directory (containing template_finger.json, template_palm.json, etc.)',
+            'pre_template_note': 'Required when --force-template is not set',
             'pre_group': 'Grouping mode for output directories: uuid=<uuid>/<file>, name=<input_filename>/<file> (default: uuid)',
             'pre_fallback': 'Allow contour fallback when corner blocks are missing',
             'pre_threads': 'Use N processes for parallel processing (default: 1=single-threaded). Multi-threading accelerates processing but output is slightly delayed',
+            'pre_force_template': 'Force a specific template JSON for segmentation; skips auto template classification and QR-based template decision',
+            'pre_quiet': 'Quiet mode: suppress per-file and inner algorithm logs, keep summary only',
             
             'export_help': 'Export cropped parts from work directory in different directory structures',
             'export_workdir': 'Work directory',
@@ -141,9 +188,12 @@ def setup_subparsers(parser, lang='en'):
             'pre_input': '输入目录或单个图像文件',
             'pre_workdir': '工作目录（输出按 UUID 子目录组织）',
             'pre_template': '模板目录（包含 template_finger.json、template_palm.json 等）',
+            'pre_template_note': '未设置 --force-template 时必填',
             'pre_group': '输出分组方式：uuid=<uuid>/<文件>，name=<源图文件名>/<文件>（默认: uuid）',
             'pre_fallback': '当角块缺失时允许使用外轮廓兜底',
             'pre_threads': '使用 N 个进程并行处理（默认: 1=单线程）。多线程可加速处理但输出会稍有延迟',
+            'pre_force_template': '强制使用指定模板 JSON 进行分割；跳过自动模板判断与二维码模板判定',
+            'pre_quiet': '安静模式：抑制逐文件和内部算法日志，仅保留汇总输出',
             
             'export_help': '从工作目录批量导出部位（支持 3 种目录结构）',
             'export_workdir': '工作目录',
@@ -180,10 +230,17 @@ def setup_subparsers(parser, lang='en'):
     pre_parser = subparsers.add_parser('pre', help=h['pre_help'])
     pre_parser.add_argument('-i', '--input', required=True, help=h['pre_input'])
     pre_parser.add_argument('-o', '--workdir', required=True, help=h['pre_workdir'])
-    pre_parser.add_argument('-t', '--template', required=True, help=h['pre_template'])
+    pre_parser.add_argument(
+        '-t',
+        '--template',
+        default=None,
+        help=f"{h['pre_template']} ({h['pre_template_note']})"
+    )
     pre_parser.add_argument('--group', choices=['uuid', 'name'], default='uuid', help=h['pre_group'])
     pre_parser.add_argument('--allow-contour-fallback', action='store_true', help=h['pre_fallback'])
     pre_parser.add_argument('--threads', type=int, default=1, help=h['pre_threads'])
+    pre_parser.add_argument('--force-template', default=None, help=h['pre_force_template'])
+    pre_parser.add_argument('--quiet', action='store_true', help=h['pre_quiet'])
     
     # ===== export =====
     export_parser = subparsers.add_parser('export', help=h['export_help'])
@@ -207,6 +264,9 @@ def setup_subparsers(parser, lang='en'):
 
 def cmd_gen(args):
     """生成多页 PDF + 模板."""
+    from src.build_card_templates import save_template_assets
+    from src.generate_cards_pdf import generate_cards
+
     print(f"[gen] Generating {args.count} cards...")
     t0 = perf_counter()
     
@@ -237,27 +297,41 @@ def cmd_gen(args):
 def cmd_pre(args):
     """预处理扫描图并分割到工作目录."""
     print(f"[pre] Preprocessing from {args.input}...")
+
+    if not args.template and not args.force_template:
+        print("ERROR: one of -t/--template or --force-template must be provided", file=sys.stderr)
+        return 1
     
     input_path = Path(args.input)
     if not input_path.exists():
         print(f"ERROR: Input path not found: {args.input}", file=sys.stderr)
         return 1
     
-    template_dir = Path(args.template)
-    if not template_dir.is_dir():
-        print(f"ERROR: Template directory not found: {args.template}", file=sys.stderr)
-        return 1
-    
-    # Find template files
-    tpl_finger = template_dir / 'template_finger.json'
-    tpl_palm = template_dir / 'template_palm.json'
-    
-    if not tpl_finger.is_file():
-        print(f"ERROR: {tpl_finger} not found", file=sys.stderr)
-        return 1
-    if not tpl_palm.is_file():
-        print(f"ERROR: {tpl_palm} not found", file=sys.stderr)
-        return 1
+    force_template_path = None
+    if args.force_template:
+        force_template_path = Path(args.force_template)
+        if not force_template_path.is_file():
+            print(f"ERROR: force template not found: {args.force_template}", file=sys.stderr)
+            return 1
+        tpl_finger = force_template_path
+        tpl_palm = force_template_path
+        print(f"[pre] Force template mode enabled: {force_template_path}")
+    else:
+        template_dir = Path(args.template)
+        if not template_dir.is_dir():
+            print(f"ERROR: Template directory not found: {args.template}", file=sys.stderr)
+            return 1
+
+        # Find template files
+        tpl_finger = template_dir / 'template_finger.json'
+        tpl_palm = template_dir / 'template_palm.json'
+
+        if not tpl_finger.is_file():
+            print(f"ERROR: {tpl_finger} not found", file=sys.stderr)
+            return 1
+        if not tpl_palm.is_file():
+            print(f"ERROR: {tpl_palm} not found", file=sys.stderr)
+            return 1
     
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -301,7 +375,8 @@ def _cmd_pre_single(args, files, tpl_finger, tpl_palm):
     
     for idx, img_path in enumerate(files, 1):
         try:
-            print(f"[pre] [{idx}/{len(files)}] Processing {img_path.name}...", end=' ')
+            if not args.quiet:
+                print(f"[pre] [{idx}/{len(files)}] Processing {img_path.name}...", end=' ')
             
             # Clean temp dir for this image
             for f in temp_dir.glob('*'):
@@ -309,23 +384,62 @@ def _cmd_pre_single(args, files, tpl_finger, tpl_palm):
                     f.unlink()
             
             # Try auto preprocessing first
-            try:
-                crops = preprocess_auto.preprocess_auto(
-                    str(img_path),
-                    str(tpl_finger),
-                    str(tpl_palm),
-                    output_dir=str(temp_dir),
-                    allow_contour_fallback=args.allow_contour_fallback
-                )
-            except Exception:
-                # Fallback: try single template preprocessing
-                print("fallback", end=' ')
-                crops = preprocess_card.preprocess_image(
-                    str(img_path),
-                    template_json=str(tpl_finger),
-                    output_dir=str(temp_dir),
-                    allow_contour_fallback=args.allow_contour_fallback
-                )
+            if args.force_template:
+                if args.quiet:
+                    with redirect_stdout(io.StringIO()):
+                        crops = preprocess_card.preprocess_image(
+                            str(img_path),
+                            template_json=str(args.force_template),
+                            output_dir=str(temp_dir),
+                            name_suffix=img_path.stem,
+                            allow_contour_fallback=args.allow_contour_fallback
+                        )
+                else:
+                    crops = preprocess_card.preprocess_image(
+                        str(img_path),
+                        template_json=str(args.force_template),
+                        output_dir=str(temp_dir),
+                        name_suffix=img_path.stem,
+                        allow_contour_fallback=args.allow_contour_fallback
+                    )
+            else:
+                try:
+                    if args.quiet:
+                        with redirect_stdout(io.StringIO()):
+                            crops = preprocess_auto.preprocess_auto(
+                                str(img_path),
+                                str(tpl_finger),
+                                str(tpl_palm),
+                                output_dir=str(temp_dir),
+                                allow_contour_fallback=args.allow_contour_fallback
+                            )
+                    else:
+                        crops = preprocess_auto.preprocess_auto(
+                            str(img_path),
+                            str(tpl_finger),
+                            str(tpl_palm),
+                            output_dir=str(temp_dir),
+                            allow_contour_fallback=args.allow_contour_fallback
+                        )
+                except Exception:
+                    # Fallback: try single template preprocessing
+                    if not args.quiet:
+                        print("fallback", end=' ')
+                    if args.quiet:
+                        with redirect_stdout(io.StringIO()):
+                            crops = preprocess_card.preprocess_image(
+                                str(img_path),
+                                template_json=str(tpl_finger),
+                                output_dir=str(temp_dir),
+                                allow_contour_fallback=args.allow_contour_fallback
+                            )
+                    else:
+                        crops = preprocess_card.preprocess_image(
+                            str(img_path),
+                            template_json=str(tpl_finger),
+                            output_dir=str(temp_dir),
+                            allow_contour_fallback=args.allow_contour_fallback
+                        )
             
             # Organize outputs
             if args.group == 'name':
@@ -345,11 +459,17 @@ def _cmd_pre_single(args, files, tpl_finger, tpl_palm):
                             uuid_dir.mkdir(exist_ok=True)
                             dest = uuid_dir / crop_file.name
                             shutil.copy2(str(crop_file), str(dest))
+                        else:
+                            fallback_dir = workdir / img_path.stem
+                            fallback_dir.mkdir(exist_ok=True)
+                            dest = fallback_dir / crop_file.name
+                            shutil.copy2(str(crop_file), str(dest))
             
-            print(f"OK ({len(crops)} crops)")
+            if not args.quiet:
+                print(f"OK ({len(crops)} crops)")
             processed += 1
         except Exception as e:
-            print(f"FAIL: {str(e)[:50]}")
+            print(f"[pre] [{idx}/{len(files)}] {img_path.name}... FAIL: {str(e)[:50]}")
             failed += 1
     
     # Clean up temp directory
@@ -387,7 +507,9 @@ def _cmd_pre_multithread(args, files, tpl_finger, tpl_palm):
             str(workdir),
             args.allow_contour_fallback,
             str(temp_dir),
-            args.group
+            args.group,
+            args.force_template,
+            args.quiet,
         ))
     
     processed = 0
@@ -399,7 +521,8 @@ def _cmd_pre_multithread(args, files, tpl_finger, tpl_palm):
         for idx, result in enumerate(pool.map(_preprocess_worker, tasks), 1):
             if result['status'] == 'ok':
                 crops = result['crops']
-                print(f"[pre] [{idx}/{len(files)}] {result['filename']}... OK ({crops} crops)")
+                if not args.quiet:
+                    print(f"[pre] [{idx}/{len(files)}] {result['filename']}... OK ({crops} crops)")
                 processed += 1
             else:
                 error = result['error']
