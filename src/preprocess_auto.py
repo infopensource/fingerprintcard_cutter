@@ -320,13 +320,51 @@ def preprocess_auto(input_path: str, finger_template: str, palm_template: str, o
     tpl_path = chosen['template']
     warped_rgb = chosen['warp']
     warp_info = chosen['warp_info']
+
+    def _pick_by_page(page_name: str):
+        nonlocal tpl_path, warped_rgb, warp_info, chosen, res_f, res_p
+        if page_name not in ('finger', 'palm'):
+            return False
+
+        if page_name == 'finger':
+            target = res_f
+            target_tpl = finger_template
+        else:
+            target = res_p
+            target_tpl = palm_template
+
+        if target is None:
+            try:
+                target_warp, target_info = _warp_to_template(img_rgb, target_tpl)
+                target = {
+                    'warp': target_warp,
+                    'warp_info': target_info,
+                    'template': target_tpl,
+                    'name': page_name,
+                }
+            except Exception:
+                return False
+
+        tpl_path = target['template']
+        warped_rgb = target['warp']
+        warp_info = target['warp_info']
+        chosen = target
+        return True
+
     print(
         f"[classify] {info['file']} score_f={res_f['score'] if res_f else 0:.3f} "
         f"score_p={res_p['score'] if res_p else 0:.3f} -> {chosen['name']}"
     )
 
     # 2) 用首选模板位置裁 QR 做验证，失败则尝试另一模板
-    uid, _page_dec = _decode_qr_from_box(warped_rgb, tpl_path)
+    uid, page_dec = _decode_qr_from_box(warped_rgb, tpl_path)
+
+    # QR payload page has higher priority than visual classification.
+    if uid and page_dec in ('finger', 'palm') and page_dec != chosen['name']:
+        switched = _pick_by_page(page_dec)
+        if switched:
+            print(f"[qr-page] {info['file']} override classify -> {page_dec}")
+
     if not uid:
         alt = res_p if chosen['name'] == 'finger' else res_f
         if alt is None:
@@ -341,18 +379,18 @@ def preprocess_auto(input_path: str, finger_template: str, palm_template: str, o
             except Exception:
                 alt = None
         if alt:
-            uid_alt, _page_alt = _decode_qr_from_box(alt['warp'], alt['template'])
+            uid_alt, page_alt = _decode_qr_from_box(alt['warp'], alt['template'])
             if uid_alt:
-                tpl_path = alt['template']
-                warped_rgb = alt['warp']
-                warp_info = alt['warp_info']
                 uid = uid_alt
-
-    # As last resort, decode QR from full image (no template validation) to avoid false failures
-    if not uid:
-        uid_full, _page_full = _decode_qr_full_image(img_rgb)
-        if uid_full:
-            uid = uid_full
+                if page_alt in ('finger', 'palm'):
+                    switched = _pick_by_page(page_alt)
+                    if switched:
+                        print(f"[qr-page] {info['file']} override classify -> {page_alt}")
+                else:
+                    tpl_path = alt['template']
+                    warped_rgb = alt['warp']
+                    warp_info = alt['warp_info']
+                    chosen = alt
 
     if not uid:
         raise LowQualityError('qr_decode_failed_both_templates')

@@ -87,6 +87,8 @@ def _preprocess_worker(args):
                         output_dir=str(temp_dir),
                         allow_contour_fallback=allow_contour_fallback
                     )
+            except preprocess_auto.LowQualityError:
+                raise
             except Exception:
                 # Fallback to single template
                 if quiet:
@@ -421,6 +423,8 @@ def _cmd_pre_single(args, files, tpl_finger, tpl_palm):
                             output_dir=str(temp_dir),
                             allow_contour_fallback=args.allow_contour_fallback
                         )
+                except preprocess_auto.LowQualityError:
+                    raise
                 except Exception:
                     # Fallback: try single template preprocessing
                     if not args.quiet:
