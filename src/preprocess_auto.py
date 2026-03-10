@@ -83,6 +83,15 @@ def _warp_to_template(img_rgb: np.ndarray, tpl_json: str):
     src_pts = np.array([[m['cx'], m['cy']] for m in chosen], dtype=np.float32)
     dst_pts = preprocess_card._template_marker_points(tpl)
 
+    # Resolve 180° ambiguity using asymmetric triangle marker, same strategy as preprocess_card.
+    idx_triangle = None
+    for i, marker in enumerate(chosen):
+        if marker.get('type') == 'triangle':
+            idx_triangle = i
+            break
+    if idx_triangle is not None:
+        src_pts = np.roll(src_pts, -idx_triangle, axis=0)
+
     tw_scaled, th_scaled, scale = preprocess_card._scaled_template_dims(img_rgb, TW, TH)
     dst_pts_scaled = dst_pts * scale
 
@@ -320,6 +329,7 @@ def preprocess_auto(input_path: str, finger_template: str, palm_template: str, o
     tpl_path = chosen['template']
     warped_rgb = chosen['warp']
     warp_info = chosen['warp_info']
+    uid = None
 
     def _pick_by_page(page_name: str):
         nonlocal tpl_path, warped_rgb, warp_info, chosen, res_f, res_p
@@ -356,8 +366,19 @@ def preprocess_auto(input_path: str, finger_template: str, palm_template: str, o
         f"score_p={res_p['score'] if res_p else 0:.3f} -> {chosen['name']}"
     )
 
+    # 1.5) Full-image QR precheck: if page is available, use it as high-priority template hint.
+    uid_full, page_full = _decode_qr_full_image(img_rgb)
+    if uid_full and page_full in ('finger', 'palm'):
+        switched = _pick_by_page(page_full)
+        if switched:
+            uid = uid_full
+            print(f"[full-qr] {info['file']} page={page_full} -> use {Path(tpl_path).name}")
+
     # 2) 用首选模板位置裁 QR 做验证，失败则尝试另一模板
-    uid, page_dec = _decode_qr_from_box(warped_rgb, tpl_path)
+    if not uid:
+        uid, page_dec = _decode_qr_from_box(warped_rgb, tpl_path)
+    else:
+        page_dec = chosen.get('name')
 
     # QR payload page has higher priority than visual classification.
     if uid and page_dec in ('finger', 'palm') and page_dec != chosen['name']:
