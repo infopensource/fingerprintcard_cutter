@@ -12,6 +12,9 @@ data/
 
 # Outputs
 /demo_output/
+/charts/
+/figures/
+/output/
 *.png
 *.jpg
 *.jpeg
